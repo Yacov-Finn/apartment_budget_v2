@@ -306,8 +306,8 @@ elif st.session_state.page == "unknown_basics":
     st.title("🤔 Help me decide - Budget Basics")
     st.write("Let's start with some basic information to help you find the right apartment deal.")
     
-    # The user will enter his down payment in NIS
-    budget = st.number_input("Enter your down payment (NIS)", min_value=0, help="This is the cash you have available for the apartment purchase")
+    # The user will enter his available cash in NIS
+    total_cash = st.number_input("Enter your total available cash (NIS)", min_value=0, help="This is the total cash you have available (including money for fees and down payment)")
     
     # The user will enter whether he is an Israeli citizen or not
     is_israeli = st.checkbox("I am an Israeli citizen")
@@ -320,23 +320,26 @@ elif st.session_state.page == "unknown_basics":
     # We will calculate the maximum mortgage he can take based on the max monthly payment and the years
     mortgage_years = st.selectbox("Select the mortgage term (years)", options=[20, 30], index=1)
     
-    if budget > 0:
+    if total_cash > 0:
         # Calculate maximum mortgage based on citizenship and first apartment status
         if is_israeli and is_first_apartment:
             max_ltv = 0.75  # 75% loan-to-value for Israeli first-time buyers
         else:
             max_ltv = 0.50  # 50% loan-to-value for others
         
-        # Since we need to solve for price iteratively, we'll estimate the maximum mortgage
-        # Initial rough estimate of maximum affordable price
-        fee_rate = 0.01 * 1.18 + 0.02 * 1.18  # lawyer + agent fees = 2.95%
-        estimated_price = budget / (1 + fee_rate - max_ltv)
+        # Estimate fees as percentage of price (rough estimate for initial calculation)
+        # Typical fees: lawyer (1.18%), agent (1.77%), mortgage advisor (~1%), purchase tax (varies)
+        estimated_fee_rate = 0.05  # Start with 5% estimate for fees
+        
+        # Initial price estimate: Cash = Price * (1 - LTV + fee_rate)
+        # So: Price = Cash / (1 - LTV + fee_rate)
+        initial_price_estimate = total_cash / (1 - max_ltv + estimated_fee_rate)
         
         # Calculate maximum mortgage based on LTV ratio
-        max_mortgage_from_ltv = estimated_price * max_ltv
+        max_mortgage_from_ltv = initial_price_estimate * max_ltv
         
         st.success(f"Based on your profile, you can get a mortgage of up to {max_ltv*100:.0f}% of the apartment price.")
-        st.info(f"With your down payment of {budget:,.0f} NIS, the estimated maximum mortgage you can take is approximately {max_mortgage_from_ltv:,.0f} NIS.\n (Since part of your downpayment will go towards fees)")
+        st.info(f"With your total cash of {total_cash:,.0f} NIS, the estimated maximum mortgage you can take is approximately {max_mortgage_from_ltv:,.0f} NIS.")
         
         # Let user choose mortgage amount
         chosen_mortgage = st.slider(
@@ -348,23 +351,26 @@ elif st.session_state.page == "unknown_basics":
             help="Select how much you want to borrow. Lower amounts mean lower monthly payments."
         )
         
-        if chosen_mortgage > 0:
+        if chosen_mortgage >= 0:  # Allow zero mortgage (cash purchase)
             # Calculate monthly payment based on chosen mortgage
-            if mortgage_years == 30:
-                monthly_payment = (chosen_mortgage / 1000000) * 5550
+            if chosen_mortgage > 0:
+                if mortgage_years == 30:
+                    monthly_payment = (chosen_mortgage / 1000000) * 5550
+                else:
+                    monthly_payment = (chosen_mortgage / 1000000) * 6700
+                st.write(f"**Your estimated monthly mortgage payment: {monthly_payment:,.0f} NIS** ({mortgage_years} years)")
             else:
-                monthly_payment = (chosen_mortgage / 1000000) * 6700
+                monthly_payment = 0
+                st.write("**Cash purchase - No monthly mortgage payments**")
             
-            st.write(f"**Your estimated monthly mortgage payment: {monthly_payment:,.0f} NIS** ({mortgage_years} years)")
+            # Now calculate the apartment price based on chosen mortgage and total cash
+            # Iterative calculation: Cash = Fees + Down Payment, Price = Down Payment + Mortgage
             
-            # Now calculate the apartment price based on chosen mortgage and budget
-            # We need to solve iteratively since fees depend on price
+            # Initial estimate: assume Price = Cash + Mortgage (ignoring fees for first iteration)
+            price_estimate = total_cash + chosen_mortgage
             
-            # Initial estimate
-            price_estimate = budget + chosen_mortgage
-            
-            # Iterate to find correct price including all fees
-            for _ in range(10):  # Max 10 iterations
+            # Iterate to find correct price
+            for iteration in range(15):  # Max 15 iterations
                 # Calculate mortgage advisor fee
                 if chosen_mortgage == 0:
                     mortgage_advisor_fee = 0
@@ -372,42 +378,50 @@ elif st.session_state.page == "unknown_basics":
                     mortgage_advisor_fee = max(7500, chosen_mortgage * 0.01) * 1.18
                 
                 # Calculate purchase tax for current price estimate
-                _, stamp_duty = calculate_mort_and_tax(price_estimate, is_israeli, is_first_apartment, chosen_mortgage)
                 if is_oleh and is_first_apartment:
                     stamp_duty = calc_purchase_tax_oleh(price_estimate)
-
+                else:
+                    _, stamp_duty = calculate_mort_and_tax(price_estimate, is_israeli, is_first_apartment, chosen_mortgage)
                 
                 # Calculate total fees
                 lawyer_fee = price_estimate * 0.01 * 1.18
                 agent_fee = price_estimate * 0.015 * 1.18
                 total_fees = lawyer_fee + agent_fee + mortgage_advisor_fee + stamp_duty
                 
-                # Calculate new price estimate
-                new_price = budget + chosen_mortgage + total_fees
+                # The correct equation: Total Cash = Total Fees + Down Payment
+                # Where: Down Payment = Price - Mortgage
+                # So: Total Cash = Total Fees + (Price - Mortgage)
+                # Therefore: Price = Total Cash - Total Fees + Mortgage
+                new_price = total_cash - total_fees + chosen_mortgage
                 
                 # Check convergence
-                if abs(new_price - price_estimate) < 1000:  # Converged within 1000 NIS
+                if abs(new_price - price_estimate) < 100:  # Converged within 100 NIS
                     break
                 
                 price_estimate = new_price
             
             price = price_estimate
+            down_payment = price - chosen_mortgage
             
-            # Verify that the chosen mortgage doesn't exceed LTV limits
-            actual_ltv = chosen_mortgage / price
-            if actual_ltv > max_ltv:
-                st.error(f"Warning: Your chosen mortgage exceeds the maximum allowed ({max_ltv*100:.0f}% of apartment price). Please reduce the mortgage amount.")
+            # Verify that we have enough cash and don't exceed LTV limits
+            if total_fees + down_payment > total_cash:
+                st.error("❌ Insufficient cash! Please reduce the mortgage amount or increase your available cash.")
+            elif chosen_mortgage > 0 and (chosen_mortgage / price) > max_ltv:
+                st.error(f"❌ Your chosen mortgage exceeds the maximum allowed ({max_ltv*100:.0f}% of apartment price). Please reduce the mortgage amount.")
+            elif price <= 0:
+                st.error("❌ Invalid calculation. Please adjust your inputs.")
             else:
                 # Store data in session state
                 st.session_state.unknown_data = {
-                    'budget': budget,
+                    'total_cash': total_cash,
                     'is_israeli': is_israeli,
                     'is_first_apartment': is_first_apartment,
-                    'is_oleh': is_oleh,                 # <— add this
+                    'is_oleh': is_oleh,
                     'mortgage_years': mortgage_years,
                     'chosen_mortgage': chosen_mortgage,
                     'monthly_payment': monthly_payment,
                     'price': price,
+                    'down_payment': down_payment,
                     'lawyer_fee': lawyer_fee,
                     'agent_fee': agent_fee,
                     'mortgage_advisor_fee': mortgage_advisor_fee,
@@ -418,13 +432,21 @@ elif st.session_state.page == "unknown_basics":
 
                 st.success(f"✅ **Summary:**")
                 st.write(f"• Maximum apartment price you can afford: **{price:,.0f} NIS**")
-                st.write(f"• Your down payment: **{budget:,.0f} NIS**")
+                st.write(f"• Down payment (to seller): **{down_payment:,.0f} NIS**")
+                st.write(f"• Total fees: **{total_fees:,.0f} NIS**")
                 st.write(f"• Your chosen mortgage: **{chosen_mortgage:,.0f} NIS**")
-                st.write(f"• Monthly mortgage payment: **{monthly_payment:,.0f} NIS**")
-                st.write(f"• Loan-to-value ratio: **{actual_ltv*100:.1f}%**")
+                if chosen_mortgage > 0:
+                    st.write(f"• Monthly mortgage payment: **{monthly_payment:,.0f} NIS**")
+                    st.write(f"• Loan-to-value ratio: **{(chosen_mortgage/price)*100:.1f}%**")
+                
+                # Cash breakdown
+                st.info(f"💰 **Cash Usage:** {total_fees:,.0f} NIS (fees) + {down_payment:,.0f} NIS (down payment) = {total_fees + down_payment:,.0f} NIS of your {total_cash:,.0f} NIS")
+                remaining_cash = total_cash - total_fees - down_payment
+                if remaining_cash > 0:
+                    st.success(f"💰 **Remaining cash:** {remaining_cash:,.0f} NIS")
         
     else:
-        st.warning("Please enter your down payment to see calculations.") 
+        st.warning("Please enter your total available cash to see calculations.") 
     
     # Navigation buttons
     col1, col2 = st.columns(2)
@@ -434,7 +456,6 @@ elif st.session_state.page == "unknown_basics":
     with col2:
         if st.button("Continue: Detailed Information ➡️", use_container_width=True):
             go("unknown_details")
-
 # --- UNKNOWN DETAILS PAGE ---
 elif st.session_state.page == "unknown_details":
     st.title("🤔 Budget Analysis Details")
@@ -449,10 +470,17 @@ elif st.session_state.page == "unknown_details":
         
         st.success("**Your Apartment Deal Summary:**")
         st.write(f"• Maximum apartment price you can afford: **{data['price']:,.0f} NIS**")
-        st.write(f"• Your down payment: **{data['budget']:,.0f} NIS**")
+        st.write(f"• Your total cash available: **{data['total_cash']:,.0f} NIS**")  # Fixed: was 'budget'
+        st.write(f"• Down payment (to seller): **{data['down_payment']:,.0f} NIS**")  # Fixed: was 'budget'
         st.write(f"• Your chosen mortgage: **{data['chosen_mortgage']:,.0f} NIS**")
-        st.write(f"• Monthly mortgage payment: **{data['monthly_payment']:,.0f} NIS** ({data['mortgage_years']} years)")
-        st.write(f"• Loan-to-value (of property) ratio: **{(data['chosen_mortgage']/data['price'])*100:.1f}%**")
+        if data['chosen_mortgage'] > 0:
+            st.write(f"• Monthly mortgage payment: **{data['monthly_payment']:,.0f} NIS** ({data['mortgage_years']} years)")
+            st.write(f"• Loan-to-value ratio: **{(data['chosen_mortgage']/data['price'])*100:.1f}%**")
+        else:
+            st.write("• **Cash purchase - No monthly mortgage payments**")
+        
+        # Calculate remaining cash after purchase
+        remaining_cash = data['total_cash'] - data['total_fees'] - data['down_payment']
         
         # Show breakdown of all costs
         st.subheader("💰 Complete Cost Breakdown:")
@@ -469,18 +497,25 @@ elif st.session_state.page == "unknown_details":
             st.write(f"• Mortgage advisor fee: {data['mortgage_advisor_fee']:,.0f} NIS")
         
         with col2:
-            st.write("**Financing:**")
-            st.write(f"• Your down payment: {data['budget']:,.0f} NIS")
+            st.write("**Your Financing:**")
+            st.write(f"• Total cash available: {data['total_cash']:,.0f} NIS")
+            st.write(f"• Down payment: {data['down_payment']:,.0f} NIS")
             st.write(f"• Mortgage amount: {data['chosen_mortgage']:,.0f} NIS")
-            st.write(f"• Monthly payment: {data['monthly_payment']:,.0f} NIS")
+            if data['chosen_mortgage'] > 0:
+                st.write(f"• Monthly payment: {data['monthly_payment']:,.0f} NIS")
+            
+            st.write("**Cash Usage:**")
+            st.write(f"• Total fees paid: {data['total_fees']:,.0f} NIS")
+            st.write(f"• **Remaining cash: {remaining_cash:,.0f} NIS**")
         
         st.write("---")
-        st.write(f"**Total fees: {data['total_fees']:,.0f} NIS**")
+        st.write(f"**Total transaction fees: {data['total_fees']:,.0f} NIS**")
         
         # Verify the equation
-        verification = data['budget'] + data['chosen_mortgage'] + data['total_fees']
-        st.write(f"**Verification:** Down payment ({data['budget']:,.0f}) + Mortgage ({data['chosen_mortgage']:,.0f}) + Total Fees ({data['total_fees']:,.0f}) = {verification:,.0f} NIS")
-        st.write(f"This should cover the apartment price: {data['price']:,.0f} NIS ✓" if abs(verification - data['price']) < 1000 else "⚠️ Calculation mismatch")
+        cash_used = data['total_fees'] + data['down_payment']
+        st.write(f"**Cash Verification:** Fees ({data['total_fees']:,.0f}) + Down Payment ({data['down_payment']:,.0f}) = {cash_used:,.0f} NIS used from your {data['total_cash']:,.0f} NIS")
+        st.write(f"**Price Verification:** Down Payment ({data['down_payment']:,.0f}) + Mortgage ({data['chosen_mortgage']:,.0f}) = {data['down_payment'] + data['chosen_mortgage']:,.0f} NIS")
+        st.write(f"This should equal apartment price: {data['price']:,.0f} NIS ✓" if abs((data['down_payment'] + data['chosen_mortgage']) - data['price']) < 100 else "⚠️ Calculation mismatch")
         
         # Download summary button
         download_summary = st.button("📄 Download Summary as Excel", use_container_width=True)
@@ -488,27 +523,29 @@ elif st.session_state.page == "unknown_details":
             summary_data = {
                 "Item": [
                     "Apartment Price", 
+                    "Total Cash Available",
                     "Down Payment", 
                     "Mortgage Amount", 
                     "Purchase Tax", 
                     "Agent Fee", 
                     "Lawyer Fee", 
                     "Mortgage Advisor Fee", 
-                    "Total Additional Costs", 
-                    "Total Cash Needed", 
-                    f"Monthly Mortgage Payment ({data['mortgage_years']} years)"
+                    "Total Transaction Fees", 
+                    "Remaining Cash After Purchase",
+                    f"Monthly Mortgage Payment ({data['mortgage_years']} years)" if data['chosen_mortgage'] > 0 else "Monthly Payment (Cash Purchase)"
                 ],
                 "Amount (NIS)": [
                     data['price'], 
-                    data['budget'], 
+                    data['total_cash'],
+                    data['down_payment'], 
                     data['chosen_mortgage'], 
                     data['stamp_duty'], 
                     data['agent_fee'], 
                     data['lawyer_fee'], 
                     data['mortgage_advisor_fee'], 
                     data['total_fees'], 
-                    total_cash_needed, 
-                    data['monthly_payment']
+                    remaining_cash, 
+                    data['monthly_payment'] if data['chosen_mortgage'] > 0 else 0
                 ]
             }
             df_summary = pd.DataFrame(summary_data)
